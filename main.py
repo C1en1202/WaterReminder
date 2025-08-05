@@ -3,14 +3,70 @@ import os
 import json
 import datetime
 import time
-import sys
 import winreg
+import psutil
+import ctypes
 from PySide6.QtWidgets import (QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QMessageBox, QSystemTrayIcon, QMenu)
-from PySide6.QtGui import QAction, QPixmap
+from PySide6.QtGui import QAction, QPixmap, QPainter, QBrush, QPen, QColor
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QTimer, QDateTime, QCoreApplication
-from PySide6.QtCore import Qt, QTimer, QDateTime, QCoreApplication
-from PySide6.QtGui import QFont
+
+# 水瓶UI组件
+class WaterBottleWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_water = 0
+        self.daily_limit = 3000
+        self.setMinimumSize(200, 300)
+        self.setMaximumSize(200, 300)
+
+    def set_values(self, current_water, daily_limit):
+        self.current_water = current_water
+        self.daily_limit = daily_limit
+        self.update()  # 触发重绘
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 获取窗口尺寸
+        width = self.width()
+        height = self.height()
+
+        # 水瓶参数
+        bottle_width = width * 0.6
+        bottle_height = height * 0.8
+        bottle_x = (width - bottle_width) / 2
+        bottle_y = height * 0.1
+
+        # 绘制水瓶轮廓
+        pen = QPen(Qt.black, 2)
+        painter.setPen(pen)
+        painter.drawRoundedRect(bottle_x, bottle_y, bottle_width, bottle_height, 10, 10)
+
+        # 绘制水瓶瓶颈
+        neck_width = bottle_width * 0.4
+        neck_height = height * 0.1
+        neck_x = (width - neck_width) / 2
+        neck_y = bottle_y - neck_height
+        painter.drawRect(neck_x, neck_y, neck_width, neck_height)
+
+        # 计算水量高度
+        water_percentage = min(self.current_water / self.daily_limit, 1.0)
+        water_height = bottle_height * water_percentage
+        water_y = bottle_y + bottle_height - water_height
+
+        # 绘制水
+        water_brush = QBrush(QColor(51, 153, 255, 180))  # 半透明蓝色
+        painter.setBrush(water_brush)
+        painter.drawRoundedRect(bottle_x + 2, water_y, bottle_width - 4, water_height - 2, 8, 8)
+
+        # 绘制水量文本
+        font = QFont("SimHei", 10)
+        painter.setFont(font)
+        water_text = f"{self.current_water}ml / {self.daily_limit}ml"
+        text_rect = painter.boundingRect(0, 0, width, 20, Qt.AlignCenter, water_text)
+        painter.drawText(0, height - 20, width, 20, Qt.AlignCenter, water_text)
 
 # 移除已弃用的高DPI缩放设置
 # QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
@@ -63,20 +119,49 @@ class WaterReminderApp(QMainWindow):
         self.init_system_tray()
 
     def load_config(self):
-        """加载配置文件"""
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
-        if not os.path.exists(config_path):
-            # 创建默认配置
-            default_config = {
+        """加载配置文件，如果不存在则创建默认配置"""
+        try:
+            # 获取程序所在目录的绝对路径
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(app_dir, 'config.json')
+
+            # 确保目录存在
+            os.makedirs(app_dir, exist_ok=True)
+
+            # 如果配置文件不存在，创建默认配置
+            if not os.path.exists(config_path):
+                default_config = {
+                    "daily_limit": 3000,
+                    "drink_amount": 300,
+                    "reminder_interval": 30
+                }
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(default_config, f, ensure_ascii=False, indent=2)
+                print(f'配置文件已创建: {config_path}')
+                # QMessageBox.information(self, '配置创建', f'配置文件已创建: {config_path}')
+                return default_config
+            else:
+                # 加载现有配置
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    # 确保配置有所有必要的键
+                    required_keys = ['daily_limit', 'drink_amount', 'reminder_interval']
+                    for key in required_keys:
+                        if key not in config:
+                            config[key] = 3000 if key == 'daily_limit' else 300 if key == 'drink_amount' else 30
+                    # 保存更新后的配置
+                    with open(config_path, 'w', encoding='utf-8') as f_update:
+                        json.dump(config, f_update, ensure_ascii=False, indent=2)
+                    return config
+        except Exception as e:
+            print(f'加载或创建配置文件失败: {str(e)}')
+            # QMessageBox.critical(self, '配置错误', f'加载或创建配置文件失败: {str(e)}')
+            # 返回默认配置以确保程序可以运行
+            return {
                 "daily_limit": 3000,
-                "drink_amount": 300
+                "drink_amount": 300,
+                "reminder_interval": 30
             }
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(default_config, f, ensure_ascii=False, indent=2)
-            return default_config
-        else:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
 
     def load_drinking_history(self):
         """加载今日喝水记录"""
@@ -115,6 +200,11 @@ class WaterReminderApp(QMainWindow):
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
+
+        # 水瓶UI组件
+        self.water_bottle = WaterBottleWidget()
+        self.water_bottle.set_values(self.today_drunk, self.daily_limit)
+        main_layout.addWidget(self.water_bottle, alignment=Qt.AlignCenter)
 
         # 今日喝水量
         self.water_label = QLabel(f"今日已喝水: {self.today_drunk}ml / {self.daily_limit}ml")
@@ -220,6 +310,7 @@ class WaterReminderApp(QMainWindow):
         # 更新UI
         self.water_label.setText(f"今日已喝水: {self.today_drunk}ml / {self.daily_limit}ml")
         self.progress_value.setText(f"{int(self.today_drunk/self.daily_limit*100)}%")
+        self.water_bottle.set_values(self.today_drunk, self.daily_limit)
 
         # 保存记录
         self.save_drinking_history()
@@ -377,6 +468,7 @@ class WaterReminderApp(QMainWindow):
             # 更新UI
             self.water_label.setText(f"今日已喝水: {self.today_drunk}ml / {self.daily_limit}ml")
             self.progress_value.setText(f"{int(self.today_drunk/self.daily_limit*100)}%")
+            self.water_bottle.set_values(self.today_drunk, self.daily_limit)
             
             # 更新历史记录
             self.save_drinking_history()
@@ -384,7 +476,39 @@ class WaterReminderApp(QMainWindow):
             # 显示提示
             QMessageBox.information(self, "操作成功", "今日喝水记录已清空")
 
+def check_if_already_running():
+    """检查程序是否已经在运行"""
+    # 获取当前进程ID
+    current_pid = os.getpid()
+    # 获取当前进程名称
+    current_process_name = psutil.Process(current_pid).name()
+
+    # 遍历所有进程
+    for proc in psutil.process_iter(['pid', 'name', 'exe']):
+        try:
+            proc_info = proc.info
+            # 跳过当前进程
+            if proc_info['pid'] == current_pid:
+                continue
+            # 检查进程名称是否相同
+            if proc_info['name'] == current_process_name or proc_info['name'] == 'WaterReminder.exe':
+                # 尝试获取窗口并激活
+                try:
+                    # 使用Windows API激活窗口
+                    ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 9)  # SW_RESTORE
+                    ctypes.windll.user32.SetForegroundWindow(ctypes.windll.kernel32.GetConsoleWindow())
+                except:
+                    pass
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return False
+
 if __name__ == "__main__":
+    # 检查程序是否已经在运行
+    if check_if_already_running():
+        sys.exit(0)
+
     # 允许中文显示
     QCoreApplication.setApplicationName("喝水提醒")
     app = QApplication(sys.argv)

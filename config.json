@@ -1,4 +1,5 @@
 {
   "daily_limit": 3000,
-  "drink_amount": 300
+  "drink_amount": 300,
+  "reminder_interval": 30
 }
